@@ -1,0 +1,119 @@
+# ──────────────────────────────────────────────
+# Stage 1: 공고 필터 설정
+# ──────────────────────────────────────────────
+job_filter:
+  # 통과시킬 지역 (이 목록에 포함된 단어가 지역명에 있으면 통과)
+  allowed_locations:
+    - 서울
+    - 판교
+    - 성남
+    - 분당
+    - 강남
+    - 종로
+    - 마포
+    - 여의도
+
+  # 타겟 직무 키워드 (제목/직무명에 하나라도 포함되면 1차 통과)
+  target_roles:
+    - PM
+    - 프로덕트 매니저
+    - Product Manager
+    - PO
+    - 프로덕트 오너
+    - 기획자
+    - 서비스 기획
+
+  # 제외 키워드 (제목에 하나라도 포함되면 바로 제외)
+  exclude_keywords:
+    - 코딩테스트 필수
+    - 교대근무
+    - 생산직
+    - 제조
+    - 운전
+    - 인턴
+    - 아르바이트
+    - 파트타임
+    - 야간
+
+  # 최소 경력 (년). 공고에 명시된 최대 경력 요건이 이 값보다 크면 제외
+  max_required_experience_years: 5
+
+# ──────────────────────────────────────────────
+# Stage 2: 자소서 채점 설정
+# ──────────────────────────────────────────────
+cover_letter:
+  pass_score: 88          # 이 점수 이상이면 제출 가능
+  max_iterations: 5       # 최대 채점-수정 반복 횟수
+  model: claude-opus-4-7
+
+  # 100점 기준표 (항목별 배점)
+  scoring_rubric:
+    # 글 품질 (50점)
+    - id: core_first_sentence
+      name: 핵심이 첫 문장에
+      max_score: 15
+    - id: numbers_present
+      name: 수치/숫자 존재
+      max_score: 15
+    - id: no_ai_tone
+      name: AI투 없음
+      max_score: 10
+      # "활용할 수 있습니다", "하도록 하겠습니다", "기여할 수 있을 것입니다" 등
+    - id: conciseness
+      name: 불필요한 미사여구 없음
+      max_score: 10
+
+    # 직무 적합성 (50점)
+    - id: jd_keyword_coverage
+      name: 공고 요구 역량 커버
+      max_score: 20
+    - id: experience_link
+      name: 내 경험과 직무 연결
+      max_score: 20
+    - id: company_fit
+      name: 회사 맥락 반영
+      max_score: 10
+
+  # 개인 체크리스트 (제출 전 최종 확인)
+  personal_checklist:
+    - 가운뎃점(·) 미사용
+    - '"활용할 수 있습니다" 문구 없음'
+    - '"하도록 하겠습니다" 문구 없음'
+    - 한 문단 최대 5줄
+    - 글자 수 공고 기준 ±10% 이내
+
+# ──────────────────────────────────────────────
+# Stage 4: 면접 코치 설정
+# ──────────────────────────────────────────────
+interview_coach:
+  model: claude-opus-4-7
+  personality_questions: 10
+  technical_questions: 10
+
+  # 4단 답변 구조 채점 기준
+  answer_rubric:
+    - id: metric
+      name: 지표 명시
+      max_score: 25
+    - id: value
+      name: 수치 값 존재
+      max_score: 25
+    - id: action_basis
+      name: 행동/근거 (책임 나열 아닌 실제 행동)
+      max_score: 25
+    - id: result
+      name: 결과 명시
+      max_score: 25
+
+  answer_time_limit_seconds: 60   # 적정 답변 시간 (초)
+
+# ──────────────────────────────────────────────
+# Gmail IMAP 설정
+# ──────────────────────────────────────────────
+gmail:
+  imap_host: imap.gmail.com
+  imap_port: 993
+  # 사람인/잡코리아 알림 메일 발신자 주소
+  saramin_sender: info@saramin.co.kr
+  jobkorea_sender: info@jobkorea.co.kr
+  wanted_sender: notification@wanted.co.kr
