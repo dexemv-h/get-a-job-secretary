@@ -1,0 +1,8 @@
+anthropic>=0.40.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+requests>=2.32.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+rich>=13.0.0          # 터미널 출력 예쁘게
+click>=8.1.0          # CLI
