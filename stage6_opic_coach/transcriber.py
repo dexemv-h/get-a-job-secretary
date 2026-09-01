@@ -60,6 +60,22 @@ class Transcript:
         return len(self.words)
 
 
+def _audio_duration(path: Path, fallback: float) -> float:
+    """
+    wav/오디오 파일의 실제 길이를 읽는다.
+
+    faster-whisper 가 돌려주는 info.duration 은 vad_filter 설정과 버전에 따라
+    무음 제거 후 길이일 수 있어, 파일에서 직접 읽은 값을 우선한다.
+    이 값이 delivery 지표의 분모(발화 속도·멈춤 비율)가 되므로 틀리면 지표가 통째로 어긋난다.
+    """
+    try:
+        import soundfile as sf
+
+        return float(sf.info(str(path)).duration)
+    except Exception:
+        return fallback
+
+
 def _stt_config(settings: dict) -> dict:
     cfg = dict(_DEFAULT_STT)
     cfg.update((settings.get("opic_coach", {}) or {}).get("stt", {}) or {})
@@ -116,10 +132,11 @@ def transcribe(audio_path: str | Path, settings: dict) -> Transcript:
                 )
             )
 
+    reported = float(getattr(info, "duration", 0.0) or 0.0)
     return Transcript(
         text=" ".join(t.strip() for t in texts).strip(),
         words=words,
-        duration=round(getattr(info, "duration", 0.0), 3),
+        duration=round(_audio_duration(path, reported), 3),
         language=getattr(info, "language", cfg["language"]),
         audio_path=str(path),
         model=cfg["model"],

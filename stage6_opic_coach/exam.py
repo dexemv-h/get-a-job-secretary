@@ -340,6 +340,9 @@ def run_exam(
         recording = record_fn(directory / f"q{q.number:02d}.wav", max_seconds=max_seconds)
         note = " (시간 초과로 자동 종료)" if recording.stopped_by == "timeout" else ""
         echo(f"  ■ 녹음 종료 {recording.seconds}초{note}")
+        if getattr(recording, "dropped_seconds", 0) >= 1.0:
+            echo(f"  ⚠ 입력이 {recording.dropped_seconds}초 유실됐을 수 있습니다 "
+                 f"(버튼 {recording.wall_seconds}초 vs 오디오 {recording.seconds}초)")
 
         echo("  전사 중...")
         transcript = transcribe(recording.path, settings)

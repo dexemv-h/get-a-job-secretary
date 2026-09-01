@@ -23,8 +23,15 @@ CHANNELS = 1
 @dataclass
 class Recording:
     path: Path
-    seconds: float
-    stopped_by: str    # "user" | "timeout"
+    seconds: float          # 실제 저장된 오디오 길이 (샘플 수 기준)
+    wall_seconds: float     # 녹음 버튼을 누르고 있던 실제 시간
+    stopped_by: str         # "user" | "timeout"
+    overflows: int = 0      # 입력 버퍼 overflow 횟수
+
+    @property
+    def dropped_seconds(self) -> float:
+        """녹음 시간과 저장된 오디오 길이의 차이. 0보다 크면 입력이 유실된 것."""
+        return round(max(0.0, self.wall_seconds - self.seconds), 2)
 
 
 def is_available() -> tuple[bool, str]:
@@ -70,10 +77,12 @@ def record(
 
     frames: queue.Queue = queue.Queue()
     stop = threading.Event()
+    overflows = 0
 
     def callback(indata, _frames, _time, status):
-        if status:                                # overflow 등은 무시하고 계속
-            pass
+        nonlocal overflows
+        if status and getattr(status, "input_overflow", False):
+            overflows += 1
         frames.put(indata.copy())
 
     def wait_for_enter():
@@ -98,13 +107,26 @@ def record(
 
     elapsed = time.monotonic() - started
 
+    # 스트림이 닫힌 뒤 콜백이 마지막 블록을 넣는 중일 수 있어 잠깐 여유를 준다.
+    # (queue.empty() 만 믿고 바로 비우면 끝부분이 잘린다)
+    time.sleep(0.2)
     chunks = []
-    while not frames.empty():
-        chunks.append(frames.get())
-    audio = np.concatenate(chunks) if chunks else np.zeros((0, CHANNELS), dtype="float32")
+    while True:
+        try:
+            chunks.append(frames.get_nowait())
+        except queue.Empty:
+            break
 
+    audio = np.concatenate(chunks) if chunks else np.zeros((0, CHANNELS), dtype="float32")
     sf.write(str(out), audio, samplerate)
-    return Recording(path=out, seconds=round(elapsed, 1), stopped_by=stopped_by)
+
+    return Recording(
+        path=out,
+        seconds=round(len(audio) / samplerate, 1),
+        wall_seconds=round(elapsed, 1),
+        stopped_by=stopped_by,
+        overflows=overflows,
+    )
 
 
 def speak(text: str) -> bool:

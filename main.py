@@ -332,6 +332,21 @@ def _parse_answer_file(path: Path) -> tuple[str, str]:
 AUDIO_SUFFIXES = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm")
 
 
+def _warn_if_dropped(recording) -> None:
+    """녹음 시간과 저장된 오디오 길이가 어긋나면 경고. 답변 일부가 잘렸을 수 있다."""
+    if recording.dropped_seconds >= 1.0:
+        console.print(
+            f"[yellow]⚠ 입력이 {recording.dropped_seconds}초 유실됐습니다 "
+            f"(버튼을 누른 시간 {recording.wall_seconds}초 vs 저장된 오디오 {recording.seconds}초). "
+            f"답변 일부가 녹음되지 않았을 수 있습니다.[/yellow]"
+        )
+    if recording.overflows:
+        console.print(
+            f"[yellow]⚠ 입력 버퍼 overflow {recording.overflows}회 — "
+            f"다른 무거운 프로그램을 끄고 다시 시도해 보세요.[/yellow]"
+        )
+
+
 def _find_audio(stem_path: Path) -> Path | None:
     """같은 이름의 음성 파일(q1.txt ↔ q1.wav)을 찾는다."""
     for suffix in AUDIO_SUFFIXES:
@@ -510,6 +525,7 @@ def opic_record(output_path, max_seconds, question, no_transcribe):
     recording = record(output_path, max_seconds=max_seconds)
     note = " (시간 초과로 자동 종료)" if recording.stopped_by == "timeout" else ""
     console.print(f"[bold]■ 녹음 종료 {recording.seconds}초{note}[/bold] → {recording.path}")
+    _warn_if_dropped(recording)
 
     if no_transcribe:
         return
