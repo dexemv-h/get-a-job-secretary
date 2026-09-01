@@ -507,6 +507,55 @@ def opic_transcribe(audio_file, output):
         console.print(f"[green]저장: {save_transcript(transcript, output)}[/green]")
 
 
+@opic.group("profile")
+def opic_profile():
+    """Stage 6: 실제 응시 등급 기준선 관리."""
+
+
+@opic_profile.command("set")
+@click.option("--grade", required=True, help="실제로 받았던 OPIc 등급 (예: IM2)")
+@click.option("--taken", default="", help="응시 시점 (예: 2024-08)")
+@click.option("--target", default="", help="목표 등급 (예: IH)")
+@click.option("--note", default="", help="비고")
+def opic_profile_set(grade, taken, target, note):
+    """실제 응시 등급을 기준선으로 저장 (채점 프롬프트에는 주입되지 않음)."""
+    from stage6_opic_coach.profile_tracker import UserBaseline, save_baseline
+
+    try:
+        path = save_baseline(UserBaseline(
+            actual_grade=grade, taken_on=taken, target_grade=target, note=note,
+        ))
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        sys.exit(1)
+
+    console.print(f"[green]기준선 저장: 실제 {grade.upper()}"
+                  f"{' / 목표 ' + target.upper() if target else ''}[/green]")
+    console.print(f"[dim]{path}[/dim]")
+    console.print("[dim]이 등급은 채점 프롬프트에 들어가지 않습니다 — "
+                  "앵커링을 막기 위해 결과 비교에만 사용합니다.[/dim]")
+
+
+@opic_profile.command("show")
+def opic_profile_show():
+    """저장된 기준선 확인."""
+    from stage6_opic_coach.profile_tracker import load_baseline
+
+    baseline = load_baseline()
+    if not baseline:
+        console.print("[yellow]저장된 기준선이 없습니다. opic profile set --grade IM2[/yellow]")
+        return
+
+    console.print(Panel(
+        f"실제 등급: [bold]{baseline.actual_grade}[/bold]\n"
+        f"응시 시점: {baseline.taken_on or '미기재'}\n"
+        f"목표 등급: {baseline.target_grade or '미설정'}\n"
+        f"비고: {baseline.note or '-'}\n"
+        f"갱신: {baseline.updated_at}",
+        title="기준선",
+    ))
+
+
 @opic.group("exam")
 def opic_exam():
     """Stage 6: OPIc 모의고사 (출제 → 녹음 → 전사 → 등급)."""

@@ -7,10 +7,15 @@ min_answers_for_overall(기본 5) 이상 쌓였을 때만 시험 전체 예상 �
 
 Floor   여러 문제·여러 주제에서 안정적으로 반복 수행 가능한 최고 수준
 Ceiling 시도는 하지만 지속하지 못하고 breakdown 이 발생하는 수준
+
+UserBaseline (실제로 받았던 등급)은 사후 비교에만 쓴다.
+채점 프롬프트에 넣으면 모델이 그 등급에 앵커링돼 모든 답변이 그 근처로 수렴하므로,
+평가는 언제나 baseline 을 모르는 상태로 수행한다.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +37,90 @@ HOLD = "판단 보류"
 
 
 @dataclass
+class UserBaseline:
+    """실제로 받았던 OPIc 등급. 예측 검증용 기준선."""
+    actual_grade: str
+    taken_on: str = ""      # "2024-08" 처럼 응시 시점
+    target_grade: str = ""
+    note: str = ""
+    updated_at: str = ""
+
+
+def baseline_path() -> Path:
+    return opic_dir() / "profile.json"
+
+
+def save_baseline(baseline: UserBaseline) -> Path:
+    """기준선 저장. 등급 문자열은 사다리 위 값이어야 한다."""
+    if grade_index(baseline.actual_grade) < 0:
+        raise ValueError(f"actual_grade 는 {GRADES} 중 하나여야 합니다: {baseline.actual_grade}")
+    if baseline.target_grade and grade_index(baseline.target_grade) < 0:
+        raise ValueError(f"target_grade 는 {GRADES} 중 하나여야 합니다: {baseline.target_grade}")
+
+    baseline.actual_grade = baseline.actual_grade.strip().upper()
+    baseline.target_grade = baseline.target_grade.strip().upper()
+    baseline.updated_at = datetime.now().isoformat(timespec="seconds")
+
+    path = baseline_path()
+    path.write_text(json.dumps(asdict(baseline), ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def load_baseline() -> UserBaseline | None:
+    """저장된 기준선을 읽는다. 없으면 None."""
+    path = baseline_path()
+    if not path.exists():
+        return None
+    return UserBaseline(**json.loads(path.read_text(encoding="utf-8")))
+
+
+def compare_to_baseline(predicted: str, baseline: UserBaseline) -> str:
+    """
+    예측 등급과 실제 응시 등급의 괴리를 해석한다.
+
+    예측이 위로 크게 벌어지면 과대평가 신호로 본다.
+    다만 실제 응시 이후 실력이 올랐을 수도 있으므로 단정하지 않는다.
+    """
+    if predicted == HOLD:
+        return (
+            f"기준선: 실제 {baseline.actual_grade}"
+            f"{' (' + baseline.taken_on + ')' if baseline.taken_on else ''}. "
+            f"답변이 더 쌓이면 예측과 비교한다."
+        )
+
+    gap = grade_index(predicted) - grade_index(baseline.actual_grade)
+    taken = f" ({baseline.taken_on} 응시)" if baseline.taken_on else ""
+    head = f"기준선 대비: 실제 {baseline.actual_grade}{taken} → 이번 예측 {predicted}"
+
+    if gap >= 2:
+        body = (
+            f" — {gap}단계 위. 그 사이 실력이 올랐을 수도 있지만, 이 정도 격차는 "
+            f"과대평가를 먼저 의심해야 한다. 특히 실제 시험은 긴장·즉흥성·시간 압박이 "
+            f"더해지므로 연습 환경 점수가 높게 나오기 쉽다."
+        )
+    elif gap == 1:
+        body = " — 한 단계 위. 실력 향상이거나 소폭 과대평가. 다음 세션에서 재현되는지 확인 필요."
+    elif gap == 0:
+        body = " — 일치. 예측 기준이 실제 응시 결과와 어긋나지 않는다."
+    else:
+        body = (
+            f" — {abs(gap)}단계 아래. 이번 세션 컨디션 문제이거나, "
+            f"연습 답변이 실제 시험만큼 충분히 길지 않았을 수 있다."
+        )
+
+    if baseline.target_grade:
+        to_target = grade_index(baseline.target_grade) - grade_index(predicted)
+        if to_target > 0:
+            body += f" 목표 {baseline.target_grade}까지 {to_target}단계 남았다."
+        elif to_target == 0:
+            body += f" 목표 {baseline.target_grade}에 도달한 예측이다."
+        else:
+            body += f" 목표 {baseline.target_grade}를 넘어선 예측이다."
+
+    return head + body
+
+
+@dataclass
 class ProfileSummary:
     n_answers: int
     floor: str
@@ -45,6 +134,7 @@ class ProfileSummary:
     breakdown_conditions: list[str] = field(default_factory=list)
     untested_functions: list[str] = field(default_factory=list)   # 한 번도 평가되지 않은 항목
     al_blockers: list[str] = field(default_factory=list)          # AL 판정을 막은 미확인 항목
+    baseline_note: str = ""                                       # 실제 응시 등급과의 비교
     reason: str = ""
 
 
@@ -79,13 +169,18 @@ def _estimate_floor(ratings: list[OpicRating], floor_ratio: float) -> str:
     return GRADES[floor_idx]
 
 
-def summarize_profile(ratings: list[OpicRating], settings: dict) -> ProfileSummary:
+def summarize_profile(
+    ratings: list[OpicRating],
+    settings: dict,
+    baseline: UserBaseline | None = None,
+) -> ProfileSummary:
     """
     누적된 답변 평가들로 Floor / Ceiling / 전체 예상 등급을 추정.
 
     Args:
         ratings: 같은 응시자의 답변 평가 결과들
         settings: settings.yaml 전체 dict
+        baseline: 실제로 받았던 등급 (사후 비교용, 평가 자체에는 영향 없음)
     """
     cfg = settings.get("opic_coach", {})
     min_answers = cfg.get("min_answers_for_overall", 5)
@@ -96,6 +191,8 @@ def summarize_profile(ratings: list[OpicRating], settings: dict) -> ProfileSumma
     al_required = cfg.get("al_required_functions", DEFAULT_AL_REQUIRED)
 
     n = len(ratings)
+    baseline = baseline if baseline is not None else load_baseline()
+
     if n == 0:
         return ProfileSummary(
             n_answers=0, floor=HOLD, ceiling=HOLD,
@@ -211,6 +308,7 @@ def summarize_profile(ratings: list[OpicRating], settings: dict) -> ProfileSumma
         breakdown_conditions=breakdown_conditions,
         untested_functions=untested,
         al_blockers=al_blockers,
+        baseline_note=compare_to_baseline(predicted, baseline) if baseline else "",
         reason=reason,
     )
 
@@ -228,6 +326,10 @@ def format_profile_report(summary: ProfileSummary, ratings: list[OpicRating]) ->
         f"Advanced 기능 성공: {summary.advanced_success} / {summary.advanced_total}",
         f"Advanced 기능 breakdown: {summary.advanced_total - summary.advanced_success} / {summary.advanced_total}\n",
         f"이유: {summary.reason}\n",
+    ]
+    if summary.baseline_note:
+        lines += [f"{summary.baseline_note}\n"]
+    lines += [
         "## 답변별 수행 수준\n",
     ]
     for i, r in enumerate(ratings, 1):
