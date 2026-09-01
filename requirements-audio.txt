@@ -1,0 +1,7 @@
+# Stage 6 음성 입력용 선택 의존성 (로컬 실행 전용)
+#   pip install -r requirements-audio.txt
+# faster-whisper 는 최초 실행 시 모델을 내려받는다 (small 기준 약 500MB).
+faster-whisper>=1.0.0     # 로컬 STT + word timestamp
+sounddevice>=0.4.6        # 마이크 녹음 (macOS/Windows 휠에 PortAudio 포함)
+soundfile>=0.12.1         # wav 저장
+numpy>=1.24.0
