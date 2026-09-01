@@ -16,6 +16,9 @@
    `min_answers_for_overall`(기본 5) 미만이면 전체 등급은 항상 `판단 보류`.
 4. **IH vs AL은 엄격하게.** Advanced 기능을 "보여줬는가"가 아니라
    "여러 주제에서 유지하는가"로 가른다.
+   `al_required_functions`(complication handling / narration / time frame)에서
+   '안정적' 수행이 한 번도 확인되지 않으면 Floor 가 AL 로 계산돼도 예측은 IH 로 내려간다.
+   롤플레이를 건너뛴 채 AL 이 나오는 것을 코드가 막는다.
 5. **발음·억양은 어떤 경우에도 모델이 판정하지 않는다.** 이 파이프라인은 오디오를 모델에
    직접 넣지 않는다(모델이 소리를 듣지 못한다). 음성에서 얻는 것은 전사 텍스트와 시간 정보뿐이다.
    - 시간 정보로 **객관 측정 가능**: 멈춤 분포, 발화 속도, 발화 덩어리 길이, filler 밀도
@@ -31,6 +34,8 @@
 | `calibration.py` | 실제 응시 샘플 저장, blind 예측 → 실제 비교 → Calibration Note |
 | `transcriber.py` | 로컬 faster-whisper STT (word timestamp 포함, 오디오 외부 전송 없음) |
 | `delivery.py` | word timestamp → 멈춤·속도·발화 덩어리·filler 등 delivery 지표 |
+| `recorder.py` | 마이크 녹음 (16kHz mono wav) + 문항 음성 읽기 |
+| `exam.py` | 모의고사 — Background Survey, Self Assessment, 15문항 콤보 출제, 진행, 채점 |
 
 ## 사용법
 
@@ -70,7 +75,33 @@ python -m main opic session --dir answers/ --detail
 
 결과는 `$OPIC_DIR/sessions/` 에 저장된다(`--output` 으로 경로 지정 가능).
 
-### 3. 실제 응시 샘플로 보정
+### 3. 모의고사 (로컬 마이크 필요)
+
+```bash
+python -m main opic exam check       # 마이크 / faster-whisper 사용 가능 여부
+python -m main opic exam start       # Survey → 난이도 선택 → 15문항 → 녹음 → 채점
+python -m main opic exam questions   # 문항만 생성 (녹음 없이 출제 형태 확인)
+python -m main opic exam grade --dir ~/opic-coach/exams/<exam_id>   # 재채점
+```
+
+문항 구성은 코드가 고정하고(콤보 배치·기능 슬롯), 주제와 문장만 모델이 채운다.
+난이도(Self Assessment 1~6)에 따라 구성이 달라진다.
+
+| 난이도 | 구성 |
+|---|---|
+| 1~2 | 자기소개 + 설문 콤보 3개(묘사→루틴→경험) + 단순 롤플레이 + 돌발 2문항 |
+| 3~4 | 설문 콤보 + 돌발 콤보 + 롤플레이 3종 + 비교 + 이슈 |
+| 5~6 | 콤보 전반이 묘사→경험→비교로 상향, 돌발 2콤보, 이슈 3문항 |
+
+진행 중 각 문항은 `Enter`로 녹음 시작, 다시 `Enter`로 종료.
+`s`는 건너뛰기, `q`는 중단(지금까지 답변만으로 채점).
+답변은 문항마다 `$OPIC_DIR/exams/<exam_id>/` 에 wav + session.json 으로 저장되므로
+중단해도 나중에 `exam grade` 로 이어서 채점할 수 있다.
+
+> 문항 구성은 공개적으로 알려진 일반적인 OPIc 출제 형태를 옮긴 것이다.
+> 실제 시험의 문항 배치·난이도 알고리즘은 공개돼 있지 않으므로 그대로 재현한다고 주장하지 않는다.
+
+### 4. 실제 응시 샘플로 보정
 
 신뢰도는 반드시 구분해서 등록한다.
 
@@ -111,6 +142,10 @@ python -m main opic calibrate notes                  # 누적 노트 + 현재 �
 | `al_advanced_success_ratio` | 0.8 | AL 판정에 필요한 Advanced 성공률 |
 | `calibration_min_repeat` | 2 | 편향 태그 반영에 필요한 반복 횟수 |
 | `calibration_evidence_levels` | `[A]` | 보정에 쓸 샘플 신뢰도 |
+| `al_required_functions` | complication/narration/time_frame | AL 판정 전제 기능 |
+| `exam.max_answer_seconds` | 120 | 문항당 최대 녹음 길이 |
+| `exam.read_question_aloud` | true | 문항을 소리로 읽어 줌 |
+| `stt.model` | `small` | Whisper 모델 크기 |
 
 ## 음성 입력 설치
 

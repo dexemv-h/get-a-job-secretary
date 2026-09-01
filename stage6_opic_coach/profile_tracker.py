@@ -18,6 +18,7 @@ from .calibration import opic_dir
 from .rater import OpicRating
 from .rubric import (
     DEFAULT_ADVANCED_FUNCTIONS,
+    DEFAULT_AL_REQUIRED,
     FUNCTION_ITEMS,
     GRADES,
     format_range,
@@ -42,6 +43,8 @@ class ProfileSummary:
     advanced_total: int
     function_stability: dict[str, dict[str, int]] = field(default_factory=dict)
     breakdown_conditions: list[str] = field(default_factory=list)
+    untested_functions: list[str] = field(default_factory=list)   # 한 번도 평가되지 않은 항목
+    al_blockers: list[str] = field(default_factory=list)          # AL 판정을 막은 미확인 항목
     reason: str = ""
 
 
@@ -90,6 +93,7 @@ def summarize_profile(ratings: list[OpicRating], settings: dict) -> ProfileSumma
     al_ratio = cfg.get("al_advanced_success_ratio", 0.8)
     success_threshold = cfg.get("advanced_success_threshold", 0.7)
     advanced_keys = cfg.get("advanced_functions", DEFAULT_ADVANCED_FUNCTIONS)
+    al_required = cfg.get("al_required_functions", DEFAULT_AL_REQUIRED)
 
     n = len(ratings)
     if n == 0:
@@ -117,6 +121,18 @@ def summarize_profile(ratings: list[OpicRating], settings: dict) -> ProfileSumma
     for r in ratings:
         for key in FUNCTION_ITEMS:
             stability[key][r.function_status(key)] += 1
+
+    # 한 번도 평가되지 않은 항목 — 해당 기능을 요구하는 문항이 없었거나 건너뛴 경우
+    untested = [
+        FUNCTION_ITEMS[k] for k in advanced_keys
+        if stability[k]["stable"] + stability[k]["partial"] + stability[k]["weak"] == 0
+    ]
+
+    # AL 은 "여러 상황에서 유지"가 조건이므로, 확인조차 안 된 기능이 있으면 줄 수 없다.
+    al_blockers = [
+        FUNCTION_ITEMS[k] for k in al_required
+        if stability.get(k, {}).get("stable", 0) == 0
+    ]
 
     # breakdown 조건: weak + partial 이 많은 항목 상위 3개
     ranked = sorted(
@@ -148,6 +164,7 @@ def summarize_profile(ratings: list[OpicRating], settings: dict) -> ProfileSumma
             grade_index(floor) >= grade_index("IH")
             and adv_ratio >= al_ratio
             and ceiling == "AL"
+            and not al_blockers
         ):
             predicted = "AL"
             reason = (
@@ -162,6 +179,24 @@ def summarize_profile(ratings: list[OpicRating], settings: dict) -> ProfileSumma
                 f"Ceiling은 {ceiling}까지 올라가지만 여러 상황에서 안정적으로 유지되지 않아 "
                 f"Floor인 {floor}을 전체 예상 등급으로 본다."
             )
+            # AL 전제 기능이 확인되지 않았다면 Floor 가 AL 로 계산됐더라도 AL 을 줄 수 없다.
+            # 이 경우 예측 등급의 상한을 IH 로 내린다.
+            if al_blockers:
+                capped = GRADES[min(grade_index(floor), grade_index("IH"))]
+                if capped != predicted:
+                    reason = (
+                        f"Floor 계산은 {floor}까지 올라가지만 "
+                        f"{', '.join(al_blockers)} 항목에서 안정적인 수행이 한 번도 확인되지 않았다. "
+                        f"AL 은 여러 상황에서 Advanced 기능을 유지하는지가 조건이므로, "
+                        f"확인되지 않은 기능이 있는 상태에서는 {capped}까지만 인정한다 — "
+                        f"해당 기능을 요구하는 문항으로 확인이 필요하다."
+                    )
+                    predicted = capped
+                elif grade_index(floor) >= grade_index("IH"):
+                    reason += (
+                        f" 또한 {', '.join(al_blockers)} 항목이 확인되지 않아 "
+                        f"AL 판정 자체가 불가능하다."
+                    )
 
     return ProfileSummary(
         n_answers=n,
@@ -174,6 +209,8 @@ def summarize_profile(ratings: list[OpicRating], settings: dict) -> ProfileSumma
         advanced_total=advanced_total,
         function_stability=stability,
         breakdown_conditions=breakdown_conditions,
+        untested_functions=untested,
+        al_blockers=al_blockers,
         reason=reason,
     )
 
@@ -203,6 +240,18 @@ def format_profile_report(summary: ProfileSummary, ratings: list[OpicRating]) ->
         lines.append(
             f"- {label}: 안정 {c.get('stable', 0)} / 부분 {c.get('partial', 0)} / "
             f"부족 {c.get('weak', 0)} / 평가불가 {c.get('na', 0)}"
+        )
+
+    if summary.untested_functions:
+        lines.append("\n## 평가되지 않은 기능\n")
+        lines.append(
+            f"- {', '.join(summary.untested_functions)} — 해당 기능을 요구하는 문항이 없었거나 "
+            f"건너뛰었다. 이 상태의 등급은 신뢰도가 낮다."
+        )
+    if summary.al_blockers:
+        lines.append("\n## AL 판정 차단 사유\n")
+        lines.append(
+            f"- {', '.join(summary.al_blockers)} 에서 '안정적' 수행이 한 번도 확인되지 않음"
         )
 
     lines.append("\n## breakdown 발생 조건\n")

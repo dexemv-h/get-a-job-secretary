@@ -75,6 +75,11 @@ DEFAULT_ADVANCED_FUNCTIONS = [
     "complication_handling",
 ]
 
+# AL 판정 전제 조건.
+# 이 기능들에서 "안정적" 수행이 한 번도 확인되지 않으면 AL 을 줄 수 없다.
+# (루브릭이 금지하는 "complication handling 미확인 상태의 상위 등급 부여"를 코드로 막는다)
+DEFAULT_AL_REQUIRED = ["complication_handling", "narration", "time_frame"]
+
 # 발음/억양 항목 고정 문구.
 # 이 파이프라인은 오디오를 모델에 직접 넣지 않는다(모델이 소리를 듣지 못한다).
 # 따라서 발음·억양·강세·rhythm 은 어떤 경우에도 모델이 판정하지 않는다.

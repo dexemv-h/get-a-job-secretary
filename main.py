@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -504,6 +505,168 @@ def opic_transcribe(audio_file, output):
 
     if output:
         console.print(f"[green]저장: {save_transcript(transcript, output)}[/green]")
+
+
+@opic.group("exam")
+def opic_exam():
+    """Stage 6: OPIc 모의고사 (출제 → 녹음 → 전사 → 등급)."""
+
+
+def _collect_survey(input_fn=None):
+    """Background Survey 를 대화형으로 수집."""
+    from stage6_opic_coach.exam import SURVEY_FIELDS, BackgroundSurvey
+
+    console.print("[bold]Background Survey[/bold] — 실제 시험처럼 답변 주제가 여기서 정해집니다.\n")
+    values = {}
+    for key, label in SURVEY_FIELDS:
+        values[key] = (input_fn or click.prompt)(f"  {label}", default="", show_default=False)
+    return BackgroundSurvey(**values)
+
+
+def _pick_level() -> int:
+    from stage6_opic_coach.exam import SELF_ASSESSMENT
+
+    console.print("\n[bold]Self Assessment[/bold] — 난이도를 고르면 문항 구성이 달라집니다.")
+    for n, desc in SELF_ASSESSMENT.items():
+        console.print(f"  {n}. {desc}")
+    return click.prompt("난이도", type=click.IntRange(1, 6), default=4)
+
+
+@opic_exam.command("check")
+def opic_exam_check():
+    """마이크 / 음성 의존성 사용 가능 여부 확인."""
+    from stage6_opic_coach.recorder import is_available
+
+    ok, detail = is_available()
+    if ok:
+        console.print(f"[green]✅ 녹음 가능 — 입력 장치: {detail}[/green]")
+    else:
+        console.print(f"[red]❌ 녹음 불가 — {detail}[/red]")
+
+    import importlib.util
+
+    if importlib.util.find_spec("faster_whisper"):
+        console.print("[green]✅ faster-whisper 설치됨[/green]")
+    else:
+        console.print("[red]❌ faster-whisper 없음 — pip install -r requirements-audio.txt[/red]")
+
+
+@opic_exam.command("questions")
+@click.option("--level", type=click.IntRange(1, 6), default=None, help="Self Assessment 난이도")
+@click.option("--output", default=None, type=click.Path(), help="문항 저장 경로")
+def opic_exam_questions(level, output):
+    """문항만 생성 (녹음 없이 출제 형태만 확인)."""
+    from stage6_opic_coach.exam import FUNCTIONS, generate_exam
+
+    settings = _load_settings()
+    survey = _collect_survey()
+    level = level or _pick_level()
+
+    console.print("\n[cyan]문항 생성 중...[/cyan]")
+    questions = generate_exam(survey, level, settings)
+
+    lines = [f"# OPIc 모의고사 문항 (난이도 {level})\n"]
+    for q in questions:
+        lines += [
+            f"## {q.number}. [{q.category}] {q.topic}",
+            f"{q.text}",
+            f"[dim]요구 기능: {FUNCTIONS.get(q.function, q.function)} — {q.guidance}[/dim]\n",
+        ]
+    report = "\n".join(lines)
+    console.print(report)
+
+    if output:
+        Path(output).write_text(report.replace("[dim]", "").replace("[/dim]", ""), encoding="utf-8")
+        console.print(f"[green]저장: {output}[/green]")
+
+
+@opic_exam.command("start")
+@click.option("--level", type=click.IntRange(1, 6), default=None, help="Self Assessment 난이도")
+@click.option("--no-calibration", is_flag=True, help="누적 보정 기준을 적용하지 않음")
+@click.option("--skip-mic-check", is_flag=True, help="마이크 확인 없이 진행")
+def opic_exam_start(level, no_calibration, skip_mic_check):
+    """모의고사 시작 — 문항 출제 → 문항별 녹음 → 전사 → 최종 등급."""
+    from stage6_opic_coach.exam import (
+        ExamSession, generate_exam, grade_exam, new_exam_id, run_exam, save_session,
+    )
+    from stage6_opic_coach.recorder import is_available
+
+    settings = _load_settings()
+
+    if not skip_mic_check:
+        ok, detail = is_available()
+        if not ok:
+            console.print(f"[red]녹음할 수 없습니다 — {detail}[/red]")
+            console.print("[dim]로컬 머신에서 실행하거나, 폰으로 녹음한 파일을 "
+                          "opic session --dir 로 채점하세요.[/dim]")
+            sys.exit(1)
+        console.print(f"[green]입력 장치: {detail}[/green]")
+
+    survey = _collect_survey()
+    level = level or _pick_level()
+
+    console.print("\n[cyan]문항 생성 중...[/cyan]")
+    questions = generate_exam(survey, level, settings)
+
+    session = ExamSession(
+        exam_id=new_exam_id(),
+        level=level,
+        survey=survey,
+        questions=questions,
+        created_at=datetime.now().isoformat(timespec="seconds"),
+    )
+    save_session(session)
+
+    console.print(Panel(
+        f"문항 {len(questions)}개 준비 완료\n"
+        f"각 문항: Enter=녹음 시작 → 답변 → Enter=종료\n"
+        f"중간에 그만두려면 q — 지금까지 답변만으로 채점합니다.",
+        title=f"모의고사 {session.exam_id}",
+    ))
+
+    session = run_exam(session, settings, echo=console.print)
+    save_session(session)
+
+    answered = [a for a in session.answers if a.transcript.strip()]
+    if not answered:
+        console.print("[yellow]답변이 없어 채점을 건너뜁니다.[/yellow]")
+        return
+
+    ctx = _calibration_context(settings, not no_calibration)
+    console.print(f"\n[bold cyan]📊 {len(answered)}개 답변 채점 중...[/bold cyan]")
+    _, summary, report = grade_exam(session, settings, calibration_context=ctx)
+
+    console.print(report)
+    console.print(Panel(
+        f"Floor: [bold]{summary.floor}[/bold]  /  Ceiling: [bold]{summary.ceiling}[/bold]\n"
+        f"예상 OPIc: [bold]{summary.predicted_grade}[/bold]  (AL 가능성 {summary.al_probability}%)\n"
+        f"Advanced 성공 {summary.advanced_success}/{summary.advanced_total}",
+        title="모의고사 결과",
+    ))
+
+
+@opic_exam.command("grade")
+@click.option("--dir", "session_dir", required=True, type=click.Path(exists=True),
+              help="$OPIC_DIR/exams/<exam_id> 디렉토리 또는 session.json")
+@click.option("--no-calibration", is_flag=True, help="누적 보정 기준을 적용하지 않음")
+def opic_exam_grade(session_dir, no_calibration):
+    """저장된 모의고사를 다시 채점 (녹음 없이)."""
+    from stage6_opic_coach.exam import grade_exam, load_session
+
+    settings = _load_settings()
+    session = load_session(session_dir)
+    answered = [a for a in session.answers if a.transcript.strip()]
+
+    if not answered:
+        console.print("[red]채점할 답변이 없습니다.[/red]")
+        sys.exit(1)
+
+    ctx = _calibration_context(settings, not no_calibration)
+    console.print(f"[cyan]{len(answered)}개 답변 채점 중...[/cyan]")
+    _, summary, report = grade_exam(session, settings, calibration_context=ctx)
+
+    console.print(report)
+    console.print(f"[green]저장: {Path(session_dir)}/report.md[/green]")
 
 
 @opic.group("calibrate")
