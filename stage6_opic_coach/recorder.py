@@ -95,10 +95,13 @@ def record(
     waiter = threading.Thread(target=wait_for_enter, daemon=True)
     waiter.start()
 
-    started = time.monotonic()
     stopped_by = "user"
+    # 타이머는 스트림을 연 "뒤"에 시작한다. macOS 는 첫 입력 스트림에서 마이크 권한을
+    # 확인하느라 수십 초를 쓸 수 있는데, 그 시간을 녹음 시간으로 세면 실제 오디오 길이와
+    # 크게 어긋나 유실로 오인된다.
     with sd.InputStream(samplerate=samplerate, channels=CHANNELS,
                         dtype="float32", callback=callback):
+        started = time.monotonic()
         while not stop.is_set():
             if time.monotonic() - started >= max_seconds:
                 stopped_by = "timeout"
