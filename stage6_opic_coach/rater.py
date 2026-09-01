@@ -15,11 +15,13 @@ from dataclasses import dataclass, field
 import anthropic
 from dotenv import load_dotenv
 
+from .delivery import DeliveryMetrics, format_delivery_summary
 from .rubric import (
     EVALUATION_PHILOSOPHY,
     FUNCTION_ITEMS,
     GRADES,
     NO_AUDIO_PRONUNCIATION,
+    PRONUNCIATION_NOT_HEARD,
     format_range,
     grade_index,
     next_grade,
@@ -61,7 +63,7 @@ class OpicRating:
     """단일 답변 평가 결과."""
     question: str
     answer: str
-    has_audio: bool
+    has_audio: bool                 # 음성 파일이 존재하고 delivery 지표를 뽑았는지
 
     level_low: str                  # 예상 수행 수준 하한
     level_high: str                 # 예상 수행 수준 상한 (단일이면 low와 동일)
@@ -74,6 +76,7 @@ class OpicRating:
     vocabulary: DimensionAnalysis | None = None
     grammar: DimensionAnalysis | None = None
     pronunciation: str = NO_AUDIO_PRONUNCIATION
+    delivery: DeliveryMetrics | None = None
 
     blockers: list[str] = field(default_factory=list)      # 상위 등급을 막는 핵심 요소 TOP 3
     fixes: list[SentenceFix] = field(default_factory=list)
@@ -111,15 +114,18 @@ def _clamp_grade(value: str, fallback: str = "IM2") -> str:
 
 
 def _build_system_prompt(
-    has_audio: bool,
+    has_delivery: bool,
     max_fixes: int,
     calibration_context: str = "",
 ) -> str:
     function_keys = "\n".join(f'  - "{k}": {label}' for k, label in FUNCTION_ITEMS.items())
     audio_rule = (
-        "음성이 제공되었다. 발음/억양/rhythm을 comprehensibility 중심으로 평가하라."
-        if has_audio
-        else f'음성이 제공되지 않았다. pronunciation 필드에는 반드시 "{NO_AUDIO_PRONUNCIATION}" 를 그대로 넣어라.'
+        "음성에서 뽑은 delivery 지표가 함께 주어진다. 이는 멈춤·속도·발화 덩어리 크기 등\n"
+        "시간 정보이지 발음 정보가 아니다. Fluency와 Text Type 판단의 객관 근거로만 쓰고,\n"
+        "수치가 좋다는 이유만으로 등급을 올리지 마라. 특히 말이 빠르다는 것은 유창성이 아니다.\n"
+        "발음/억양은 어떤 경우에도 판정하지 마라."
+        if has_delivery
+        else "delivery 지표가 없다. 멈춤·속도·발음에 대해 추측하지 마라."
     )
     calib_block = (
         f"\n## 캘리브레이션 참고 기준\n"
@@ -151,7 +157,6 @@ def _build_system_prompt(
   "fluency":    {{"strength": "", "problem": "", "evidence": "답변에서 인용"}},
   "vocabulary": {{"strength": "", "problem": "", "evidence": "답변에서 인용"}},
   "grammar":    {{"strength": "", "problem": "", "evidence": "답변에서 인용"}},
-  "pronunciation": "음성이 있으면 평가, 없으면 고정 문구",
   "blockers": ["바로 위 등급을 막는 핵심 요소 3개. 사소한 문법 실수는 넣지 마라."],
   "fixes": [
     {{"original": "원문 문장", "problem": "무엇이 문제인지",
@@ -173,7 +178,7 @@ def rate_answer(
     question: str,
     answer: str,
     settings: dict,
-    has_audio: bool = False,
+    delivery: DeliveryMetrics | None = None,
     calibration_context: str = "",
 ) -> OpicRating:
     """
@@ -183,11 +188,14 @@ def rate_answer(
         question: OPIc 질문
         answer: 답변 transcript
         settings: settings.yaml 전체 dict
-        has_audio: 음성이 함께 제공되었는지 (False면 발음 평가 불가로 처리)
+        delivery: 음성에서 뽑은 delivery 지표 (없으면 텍스트만으로 평가)
         calibration_context: build_calibration_context() 결과 (없으면 빈 문자열)
 
     Returns:
         OpicRating
+
+    Note:
+        발음/억양은 어떤 경우에도 평가하지 않는다. 모델이 오디오를 직접 듣지 않기 때문이다.
     """
     cfg = settings.get("opic_coach", {})
     model = cfg.get("model", _DEFAULT_MODEL)
@@ -195,17 +203,20 @@ def rate_answer(
 
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    system = _build_system_prompt(has_audio, max_fixes, calibration_context)
+    system = _build_system_prompt(delivery is not None, max_fixes, calibration_context)
+    delivery_block = (
+        f"\n### 음성에서 측정한 delivery 지표 (객관 수치, 발음 정보 아님)\n"
+        f"{format_delivery_summary(delivery)}\n"
+        if delivery
+        else "\n### 음성 제공 여부\n제공되지 않음 (transcript만)\n"
+    )
     user_message = f"""\
 ### OPIc 질문
 {question}
 
 ### 수험생 답변 (transcript)
 {answer}
-
-### 음성 제공 여부
-{"제공됨" if has_audio else "제공되지 않음 (transcript만)"}
-
+{delivery_block}
 위 답변을 평가하라."""
 
     with client.messages.stream(
@@ -252,12 +263,18 @@ def rate_answer(
         for f in data.get("fixes", [])[:max_fixes]
     ]
 
-    pronunciation = data.get("pronunciation", "") if has_audio else NO_AUDIO_PRONUNCIATION
+    if delivery is None:
+        pronunciation = NO_AUDIO_PRONUNCIATION
+    else:
+        pronunciation = (
+            f"{PRONUNCIATION_NOT_HEARD}\n"
+            f"  명료도 참고치: 전사 저신뢰 단어 비율 {delivery.low_confidence_ratio:.0%}"
+        )
 
     return OpicRating(
         question=question,
         answer=answer,
-        has_audio=has_audio,
+        has_audio=delivery is not None,
         level_low=level_low,
         level_high=level_high,
         confidence=data.get("confidence", "보통"),
@@ -267,7 +284,8 @@ def rate_answer(
         fluency=_dim("fluency"),
         vocabulary=_dim("vocabulary"),
         grammar=_dim("grammar"),
-        pronunciation=pronunciation or NO_AUDIO_PRONUNCIATION,
+        pronunciation=pronunciation,
+        delivery=delivery,
         blockers=data.get("blockers", [])[:3],
         fixes=fixes,
         upgraded_answer=data.get("upgraded_answer", ""),
@@ -343,8 +361,14 @@ def format_rating_report(
         "## Pronunciation / Intonation",
         rating.pronunciation,
         "",
-        "# 등급을 막는 핵심 요소 TOP 3\n",
     ]
+    if rating.delivery is not None:
+        lines += [
+            "## Delivery 지표 (음성 시간 정보)",
+            format_delivery_summary(rating.delivery),
+            "",
+        ]
+    lines.append("# 등급을 막는 핵심 요소 TOP 3\n")
     if rating.blockers:
         lines += [f"{i}. {b}" for i, b in enumerate(rating.blockers, 1)]
     else:

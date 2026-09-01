@@ -69,6 +69,7 @@ class CalibrationSample:
     question: str
     answer: str
     has_audio: bool = False
+    audio_path: str = ""    # 있으면 blind 예측 때 delivery 지표까지 사용
     source: str = ""
     evidence: str = "A"     # A | B | C
     note: str = ""
@@ -235,11 +236,18 @@ def run_calibration(sample: CalibrationSample, settings: dict) -> CalibrationNot
     그 다음 실제 등급과 비교해 Calibration Note 를 저장한다.
     """
     # 1) blind prediction — 실제 등급도, 기존 보정 컨텍스트도 주지 않는다.
+    delivery = None
+    if sample.audio_path and Path(sample.audio_path).exists():
+        from .delivery import analyze_delivery
+        from .transcriber import transcribe
+
+        delivery = analyze_delivery(transcribe(sample.audio_path, settings))
+
     rating = rate_answer(
         question=sample.question,
         answer=sample.answer,
         settings=settings,
-        has_audio=sample.has_audio,
+        delivery=delivery,
         calibration_context="",
     )
 

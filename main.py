@@ -328,6 +328,28 @@ def _parse_answer_file(path: Path) -> tuple[str, str]:
     return path.stem, text
 
 
+AUDIO_SUFFIXES = (".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm")
+
+
+def _find_audio(stem_path: Path) -> Path | None:
+    """같은 이름의 음성 파일(q1.txt ↔ q1.wav)을 찾는다."""
+    for suffix in AUDIO_SUFFIXES:
+        candidate = stem_path.with_suffix(suffix)
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _transcribe_audio(audio_path: Path, settings: dict):
+    """음성 → (transcript 텍스트, DeliveryMetrics)."""
+    from stage6_opic_coach.delivery import analyze_delivery
+    from stage6_opic_coach.transcriber import transcribe
+
+    console.print(f"[dim]전사 중: {audio_path.name}[/dim]")
+    transcript = transcribe(audio_path, settings)
+    return transcript.text, analyze_delivery(transcript)
+
+
 def _calibration_context(settings: dict, use_calibration: bool) -> str:
     from stage6_opic_coach.calibration import build_calibration_context
 
@@ -342,17 +364,28 @@ def _calibration_context(settings: dict, use_calibration: bool) -> str:
 @opic.command("rate")
 @click.option("--question", default="", help="OPIc 질문 (직접 입력)")
 @click.option("--question-file", default=None, type=click.Path(exists=True), help="질문 파일")
-@click.option("--answer", "answer_file", required=True, type=click.Path(exists=True), help="답변 transcript 파일")
-@click.option("--audio", is_flag=True, help="음성을 함께 확인한 경우 (발음 평가 수행)")
+@click.option("--answer", "answer_file", default=None, type=click.Path(exists=True), help="답변 transcript 파일")
+@click.option("--audio", "audio_file", default=None, type=click.Path(exists=True),
+              help="답변 음성 파일 (전사 + delivery 지표 자동 추출)")
 @click.option("--no-calibration", is_flag=True, help="누적 보정 기준을 적용하지 않음")
 @click.option("--output", default=None, type=click.Path(), help="리포트 저장 경로")
-def opic_rate(question, question_file, answer_file, audio, no_calibration, output):
+def opic_rate(question, question_file, answer_file, audio_file, no_calibration, output):
     """답변 1개 → 예상 수행 수준 + 상세 분석 (전체 등급은 판단 보류)."""
     from stage6_opic_coach.rater import format_rating_report, rate_answer
 
     settings = _load_settings()
     q = _read_question(question, question_file)
-    a = Path(answer_file).read_text(encoding="utf-8").strip()
+
+    if not answer_file and not audio_file:
+        console.print("[red]--answer 또는 --audio 중 하나는 필요합니다.[/red]")
+        sys.exit(1)
+
+    delivery = None
+    if audio_file:
+        a, delivery = _transcribe_audio(Path(audio_file), settings)
+        console.print(f"[dim]전사 결과 {len(a.split())}단어[/dim]")
+    else:
+        a = Path(answer_file).read_text(encoding="utf-8").strip()
 
     if not a:
         console.print("[red]답변이 비어 있습니다.[/red]")
@@ -361,7 +394,7 @@ def opic_rate(question, question_file, answer_file, audio, no_calibration, outpu
     ctx = _calibration_context(settings, not no_calibration)
 
     console.print("[bold cyan]🎧 OPIc 답변 분석 중...[/bold cyan]")
-    rating = rate_answer(q, a, settings, has_audio=audio, calibration_context=ctx)
+    rating = rate_answer(q, a, settings, delivery=delivery, calibration_context=ctx)
     report = format_rating_report(rating)
 
     console.print(report)
@@ -380,12 +413,11 @@ def opic_rate(question, question_file, answer_file, audio, no_calibration, outpu
 
 @opic.command("session")
 @click.option("--dir", "answers_dir", required=True, type=click.Path(exists=True),
-              help="답변 파일(*.txt) 디렉토리. 각 파일 첫 줄에 'Q: 질문' 표기")
-@click.option("--audio", is_flag=True, help="음성을 함께 확인한 경우")
+              help="답변 디렉토리. q1.txt 첫 줄에 'Q: 질문', 같은 이름의 q1.wav 가 있으면 음성 사용")
 @click.option("--no-calibration", is_flag=True, help="누적 보정 기준을 적용하지 않음")
 @click.option("--detail", is_flag=True, help="답변별 상세 리포트까지 출력")
 @click.option("--output", default=None, type=click.Path(), help="리포트 저장 경로 (미지정 시 $OPIC_DIR/sessions)")
-def opic_session(answers_dir, audio, no_calibration, detail, output):
+def opic_session(answers_dir, no_calibration, detail, output):
     """여러 답변 누적 평가 → Floor / Ceiling / 전체 예상 등급."""
     from stage6_opic_coach.profile_tracker import (
         format_profile_report, save_session_report, summarize_profile,
@@ -404,11 +436,18 @@ def opic_session(answers_dir, audio, no_calibration, detail, output):
     detail_reports = []
     for i, path in enumerate(files, 1):
         q, a = _parse_answer_file(path)
+        console.print(f"[cyan][{i}/{len(files)}] {path.name} 분석 중...[/cyan]")
+
+        delivery = None
+        audio_path = _find_audio(path)
+        if audio_path:
+            a, delivery = _transcribe_audio(audio_path, settings)
+
         if not a:
             console.print(f"[yellow]⚠ {path.name}: 답변이 비어 있어 건너뜁니다.[/yellow]")
             continue
-        console.print(f"[cyan][{i}/{len(files)}] {path.name} 분석 중...[/cyan]")
-        rating = rate_answer(q, a, settings, has_audio=audio, calibration_context=ctx)
+
+        rating = rate_answer(q, a, settings, delivery=delivery, calibration_context=ctx)
         ratings.append(rating)
         detail_reports.append(format_rating_report(rating))
         console.print(f"  → {rating.level} (확신도 {rating.confidence})")
@@ -443,6 +482,30 @@ def opic_session(answers_dir, audio, no_calibration, detail, output):
         console.print(f"[green]저장: {saved}[/green]")
 
 
+@opic.command("transcribe")
+@click.option("--audio", "audio_file", required=True, type=click.Path(exists=True), help="음성 파일")
+@click.option("--output", default=None, type=click.Path(), help="transcript JSON 저장 경로")
+def opic_transcribe(audio_file, output):
+    """음성 → 전사 + delivery 지표 (등급 판정 없음)."""
+    from stage6_opic_coach.delivery import analyze_delivery, format_delivery_summary
+    from stage6_opic_coach.transcriber import save_transcript, transcribe
+
+    settings = _load_settings()
+    console.print(f"[cyan]전사 중: {audio_file}[/cyan]")
+    transcript = transcribe(audio_file, settings)
+    metrics = analyze_delivery(transcript)
+
+    console.print(Panel(transcript.text or "(인식된 발화 없음)", title="Transcript"))
+    console.print("\n[bold]Delivery 지표[/bold]")
+    console.print(format_delivery_summary(metrics))
+    console.print(
+        "\n[dim]발음·억양은 이 지표로 판단하지 않습니다 — 모델이 오디오를 직접 듣지 않습니다.[/dim]"
+    )
+
+    if output:
+        console.print(f"[green]저장: {save_transcript(transcript, output)}[/green]")
+
+
 @opic.group("calibrate")
 def opic_calibrate():
     """Stage 6: 실제 응시 샘플로 판단 기준 보정."""
@@ -457,10 +520,11 @@ def opic_calibrate():
 @click.option("--evidence", default="A", type=click.Choice(["A", "B", "C"]),
               help="A=실제 결과 확인 / B=본인 주장 / C=강사 모범답안")
 @click.option("--source", default="", help="출처")
-@click.option("--audio", is_flag=True, help="음성 제공 여부")
+@click.option("--audio", "audio_file", default=None, type=click.Path(exists=True),
+              help="샘플 음성 파일 (있으면 blind 예측에 delivery 지표 사용)")
 @click.option("--note", default="", help="비고")
 def opic_calibrate_add(sample_id, grade, question, question_file, answer_file,
-                       evidence, source, audio, note):
+                       evidence, source, audio_file, note):
     """캘리브레이션 샘플 등록."""
     from stage6_opic_coach.calibration import CalibrationSample, add_sample
 
@@ -472,7 +536,8 @@ def opic_calibrate_add(sample_id, grade, question, question_file, answer_file,
         actual_grade=grade,
         question=q,
         answer=a,
-        has_audio=audio,
+        has_audio=bool(audio_file),
+        audio_path=str(Path(audio_file).resolve()) if audio_file else "",
         source=source,
         evidence=evidence,
         note=note,

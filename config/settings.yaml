@@ -138,6 +138,17 @@ opic_coach:
   # 문장 교정 최대 개수
   max_sentence_fixes: 5
 
+  # 음성 전사 (로컬 faster-whisper — 오디오가 외부로 나가지 않음)
+  stt:
+    backend: faster-whisper
+    model: small            # tiny / base / small / medium / large-v3
+    device: auto            # auto | cpu | cuda
+    compute_type: int8      # CPU는 int8, GPU는 float16 권장
+    language: en
+    beam_size: 5
+    vad_filter: true        # 무음 구간 제거
+    verbatim_prompt: true   # filler / false start 를 지우지 않도록 유도
+
   # 캘리브레이션: 같은 편향 태그가 이 횟수 이상 반복돼야 판단 기준에 반영
   # (샘플 1건으로 전체 기준을 바꾸지 않기 위한 장치)
   calibration_min_repeat: 2
