@@ -483,6 +483,50 @@ def opic_session(answers_dir, no_calibration, detail, output):
         console.print(f"[green]저장: {saved}[/green]")
 
 
+@opic.command("record")
+@click.option("--output", "output_path", default="answer.wav", type=click.Path(), help="저장할 wav 경로")
+@click.option("--max-seconds", default=120, show_default=True, help="최대 녹음 길이 (초)")
+@click.option("--question", default="", help="녹음 전에 화면에 띄울 질문 (선택)")
+@click.option("--no-transcribe", is_flag=True, help="녹음만 하고 전사는 건너뜀")
+def opic_record(output_path, max_seconds, question, no_transcribe):
+    """마이크 녹음 → 전사 + delivery 지표. API 호출이 없어 크레딧을 쓰지 않는다."""
+    from stage6_opic_coach.delivery import analyze_delivery, format_delivery_summary
+    from stage6_opic_coach.recorder import is_available, record
+    from stage6_opic_coach.transcriber import transcribe
+
+    settings = _load_settings()
+
+    ok, detail = is_available()
+    if not ok:
+        console.print(f"[red]녹음할 수 없습니다 — {detail}[/red]")
+        sys.exit(1)
+
+    if question:
+        console.print(Panel(question, title="질문"))
+
+    click.prompt(f"Enter=녹음 시작 (최대 {max_seconds}초)", default="", show_default=False)
+    console.print("[bold red]● 녹음 중...[/bold red] 답변을 마치면 Enter")
+
+    recording = record(output_path, max_seconds=max_seconds)
+    note = " (시간 초과로 자동 종료)" if recording.stopped_by == "timeout" else ""
+    console.print(f"[bold]■ 녹음 종료 {recording.seconds}초{note}[/bold] → {recording.path}")
+
+    if no_transcribe:
+        return
+
+    console.print("[cyan]전사 중... (모델을 처음 쓰면 내려받느라 몇 분 걸릴 수 있습니다)[/cyan]")
+    transcript = transcribe(recording.path, settings)
+    metrics = analyze_delivery(transcript)
+
+    console.print(Panel(transcript.text or "(인식된 발화 없음)", title="Transcript"))
+    console.print("\n[bold]Delivery 지표[/bold]")
+    console.print(format_delivery_summary(metrics))
+    console.print(
+        "\n[dim]여기까지는 API 호출이 없어 비용이 발생하지 않습니다. "
+        "위 내용을 그대로 복사해 채점을 받을 수 있습니다.[/dim]"
+    )
+
+
 @opic.command("transcribe")
 @click.option("--audio", "audio_file", required=True, type=click.Path(exists=True), help="음성 파일")
 @click.option("--output", default=None, type=click.Path(), help="transcript JSON 저장 경로")

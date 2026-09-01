@@ -53,7 +53,11 @@ Fluency / Text Type 판단의 객관 근거로 넣는다.
 ```bash
 python -m main opic rate --question "..." --audio answers/q1.wav
 python -m main opic transcribe --audio answers/q1.wav   # 전사 + 지표만 (등급 판정 없음)
+python -m main opic record --question "..."             # 녹음 + 전사 + 지표
 ```
+
+`record` 와 `transcribe` 는 **API 를 호출하지 않는다.** 마이크·전사·지표까지 전부 로컬에서
+돌기 때문에 API 키나 크레딧 없이 쓸 수 있고, 결과를 복사해 다른 곳에서 채점받아도 된다.
 
 `--audio` 를 줘도 발음 항목은 여전히 `평가 불가`다. 대신 전사 저신뢰 단어 비율을
 **명료도 참고치**로만 표기한다(발음 점수가 아니다).
