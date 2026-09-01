@@ -108,6 +108,46 @@ interview_coach:
   answer_time_limit_seconds: 60   # 적정 답변 시간 (초)
 
 # ──────────────────────────────────────────────
+# Stage 6: OPIc 등급 예측 / 캘리브레이션 설정
+# ──────────────────────────────────────────────
+opic_coach:
+  model: claude-opus-4-7
+
+  # 시험 전체 등급을 확정하기 위해 필요한 최소 답변 수.
+  # 이보다 적으면 "판단 보류"로만 출력한다.
+  min_answers_for_overall: 5
+
+  # Floor 판정: 이 비율 이상의 답변이 하한으로 도달해야 Floor로 인정
+  floor_ratio: 0.7
+
+  # 한 답변이 "Advanced 기능 성공"으로 카운트되는 기준 (0~1)
+  # 안정=1.0 / 부분적=0.5 / 부족=0.0 의 평균이 이 값 이상
+  advanced_success_threshold: 0.7
+
+  # Advanced 기능 성공률이 이 값 이상이고 Floor가 IH 이상이면 AL 후보
+  al_advanced_success_ratio: 0.8
+
+  # Advanced 기능으로 카운트할 항목
+  advanced_functions:
+    - text_type
+    - time_frame
+    - narration
+    - description
+    - complication_handling
+
+  # 문장 교정 최대 개수
+  max_sentence_fixes: 5
+
+  # 캘리브레이션: 같은 편향 태그가 이 횟수 이상 반복돼야 판단 기준에 반영
+  # (샘플 1건으로 전체 기준을 바꾸지 않기 위한 장치)
+  calibration_min_repeat: 2
+
+  # 캘리브레이션에 사용할 샘플 신뢰도
+  #   A = 실제 시험 결과 확인 / B = 본인 주장 / C = 강사 모범답안
+  calibration_evidence_levels:
+    - A
+
+# ──────────────────────────────────────────────
 # Gmail IMAP 설정
 # ──────────────────────────────────────────────
 gmail:

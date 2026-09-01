@@ -9,6 +9,10 @@ Usage:
   python -m main interview practice    # Stage 4: 대화형 면접 연습
   python -m main kb add <주제>          # Stage 5: 지식 카드 생성
   python -m main tracker create-note   # Stage 1: 회사 노트 생성
+  python -m main opic rate             # Stage 6: OPIc 답변 1개 등급 예측
+  python -m main opic session          # Stage 6: 여러 답변 누적 → Floor/Ceiling
+  python -m main opic calibrate add    # Stage 6: 실제 응시 샘플 등록
+  python -m main opic calibrate run    # Stage 6: 예측 vs 실제 비교 → 보정
 """
 from __future__ import annotations
 
@@ -284,6 +288,273 @@ def kb_index():
     from stage5_knowledge_base.card_manager import rebuild_index
     index_path = rebuild_index()
     console.print(f"[green]인덱스 재생성: {index_path}[/green]")
+
+
+# ──────────────────────────────────────────────
+# Stage 6: OPIc 등급 예측 / 캘리브레이션
+# ──────────────────────────────────────────────
+
+@cli.group("opic")
+def opic():
+    """Stage 6: OPIc 예상 등급 판정 + 캘리브레이션."""
+
+
+def _read_question(question: str, question_file: str | None) -> str:
+    """--question 또는 --question-file 중 하나에서 질문 읽기."""
+    if question_file:
+        return Path(question_file).read_text(encoding="utf-8").strip()
+    if question:
+        return question.strip()
+    console.print("[red]--question 또는 --question-file 중 하나는 필요합니다.[/red]")
+    sys.exit(1)
+
+
+def _parse_answer_file(path: Path) -> tuple[str, str]:
+    """
+    답변 파일 파싱.
+
+    형식:
+      Q: <질문>
+      <답변 transcript ...>
+
+    'Q:' 줄이 없으면 파일명을 질문 대신 사용한다.
+    """
+    text = path.read_text(encoding="utf-8").strip()
+    lines = text.splitlines()
+    if lines and lines[0].strip().upper().startswith("Q:"):
+        question = lines[0].split(":", 1)[1].strip()
+        answer = "\n".join(lines[1:]).strip()
+        return question, answer
+    return path.stem, text
+
+
+def _calibration_context(settings: dict, use_calibration: bool) -> str:
+    from stage6_opic_coach.calibration import build_calibration_context
+
+    if not use_calibration:
+        return ""
+    ctx = build_calibration_context(settings)
+    if ctx:
+        console.print("[dim]캘리브레이션 보정 기준 적용 중[/dim]")
+    return ctx
+
+
+@opic.command("rate")
+@click.option("--question", default="", help="OPIc 질문 (직접 입력)")
+@click.option("--question-file", default=None, type=click.Path(exists=True), help="질문 파일")
+@click.option("--answer", "answer_file", required=True, type=click.Path(exists=True), help="답변 transcript 파일")
+@click.option("--audio", is_flag=True, help="음성을 함께 확인한 경우 (발음 평가 수행)")
+@click.option("--no-calibration", is_flag=True, help="누적 보정 기준을 적용하지 않음")
+@click.option("--output", default=None, type=click.Path(), help="리포트 저장 경로")
+def opic_rate(question, question_file, answer_file, audio, no_calibration, output):
+    """답변 1개 → 예상 수행 수준 + 상세 분석 (전체 등급은 판단 보류)."""
+    from stage6_opic_coach.rater import format_rating_report, rate_answer
+
+    settings = _load_settings()
+    q = _read_question(question, question_file)
+    a = Path(answer_file).read_text(encoding="utf-8").strip()
+
+    if not a:
+        console.print("[red]답변이 비어 있습니다.[/red]")
+        sys.exit(1)
+
+    ctx = _calibration_context(settings, not no_calibration)
+
+    console.print("[bold cyan]🎧 OPIc 답변 분석 중...[/bold cyan]")
+    rating = rate_answer(q, a, settings, has_audio=audio, calibration_context=ctx)
+    report = format_rating_report(rating)
+
+    console.print(report)
+    console.print(
+        Panel(
+            f"이 답변 단독 기준: [bold]{rating.level}[/bold] (확신도 {rating.confidence})\n"
+            f"시험 전체 등급: 판단 보류 — 여러 질문에서의 지속적인 수행 확인 필요",
+            title="요약",
+        )
+    )
+
+    if output:
+        Path(output).write_text(report, encoding="utf-8")
+        console.print(f"[green]저장: {output}[/green]")
+
+
+@opic.command("session")
+@click.option("--dir", "answers_dir", required=True, type=click.Path(exists=True),
+              help="답변 파일(*.txt) 디렉토리. 각 파일 첫 줄에 'Q: 질문' 표기")
+@click.option("--audio", is_flag=True, help="음성을 함께 확인한 경우")
+@click.option("--no-calibration", is_flag=True, help="누적 보정 기준을 적용하지 않음")
+@click.option("--detail", is_flag=True, help="답변별 상세 리포트까지 출력")
+@click.option("--output", default=None, type=click.Path(), help="리포트 저장 경로 (미지정 시 $OPIC_DIR/sessions)")
+def opic_session(answers_dir, audio, no_calibration, detail, output):
+    """여러 답변 누적 평가 → Floor / Ceiling / 전체 예상 등급."""
+    from stage6_opic_coach.profile_tracker import (
+        format_profile_report, save_session_report, summarize_profile,
+    )
+    from stage6_opic_coach.rater import format_rating_report, rate_answer
+
+    settings = _load_settings()
+    files = sorted(Path(answers_dir).glob("*.txt"))
+    if not files:
+        console.print("[red]*.txt 답변 파일을 찾을 수 없습니다.[/red]")
+        sys.exit(1)
+
+    ctx = _calibration_context(settings, not no_calibration)
+
+    ratings = []
+    detail_reports = []
+    for i, path in enumerate(files, 1):
+        q, a = _parse_answer_file(path)
+        if not a:
+            console.print(f"[yellow]⚠ {path.name}: 답변이 비어 있어 건너뜁니다.[/yellow]")
+            continue
+        console.print(f"[cyan][{i}/{len(files)}] {path.name} 분석 중...[/cyan]")
+        rating = rate_answer(q, a, settings, has_audio=audio, calibration_context=ctx)
+        ratings.append(rating)
+        detail_reports.append(format_rating_report(rating))
+        console.print(f"  → {rating.level} (확신도 {rating.confidence})")
+
+    if not ratings:
+        console.print("[red]평가된 답변이 없습니다.[/red]")
+        sys.exit(1)
+
+    summary = summarize_profile(ratings, settings)
+    profile_report = format_profile_report(summary, ratings)
+
+    if detail:
+        for r in detail_reports:
+            console.print(r)
+
+    console.print(profile_report)
+    console.print(
+        Panel(
+            f"Floor: [bold]{summary.floor}[/bold]  /  Ceiling: [bold]{summary.ceiling}[/bold]\n"
+            f"예상 OPIc: [bold]{summary.predicted_grade}[/bold]  (AL 가능성 {summary.al_probability}%)\n"
+            f"Advanced 성공 {summary.advanced_success}/{summary.advanced_total}",
+            title="누적 판정",
+        )
+    )
+
+    full_report = profile_report + "\n\n---\n\n" + "\n\n---\n\n".join(detail_reports)
+    if output:
+        Path(output).write_text(full_report, encoding="utf-8")
+        console.print(f"[green]저장: {output}[/green]")
+    else:
+        saved = save_session_report(full_report, name=Path(answers_dir).name)
+        console.print(f"[green]저장: {saved}[/green]")
+
+
+@opic.group("calibrate")
+def opic_calibrate():
+    """Stage 6: 실제 응시 샘플로 판단 기준 보정."""
+
+
+@opic_calibrate.command("add")
+@click.option("--sample-id", required=True, help="샘플 식별자")
+@click.option("--grade", required=True, help="실제 OPIc 등급 (NL/NM/NH/IL/IM1/IM2/IM3/IH/AL)")
+@click.option("--question", default="", help="질문 (직접 입력)")
+@click.option("--question-file", default=None, type=click.Path(exists=True), help="질문 파일")
+@click.option("--answer", "answer_file", required=True, type=click.Path(exists=True), help="답변 transcript 파일")
+@click.option("--evidence", default="A", type=click.Choice(["A", "B", "C"]),
+              help="A=실제 결과 확인 / B=본인 주장 / C=강사 모범답안")
+@click.option("--source", default="", help="출처")
+@click.option("--audio", is_flag=True, help="음성 제공 여부")
+@click.option("--note", default="", help="비고")
+def opic_calibrate_add(sample_id, grade, question, question_file, answer_file,
+                       evidence, source, audio, note):
+    """캘리브레이션 샘플 등록."""
+    from stage6_opic_coach.calibration import CalibrationSample, add_sample
+
+    q = _read_question(question, question_file)
+    a = Path(answer_file).read_text(encoding="utf-8").strip()
+
+    sample = CalibrationSample(
+        sample_id=sample_id,
+        actual_grade=grade,
+        question=q,
+        answer=a,
+        has_audio=audio,
+        source=source,
+        evidence=evidence,
+        note=note,
+    )
+    try:
+        path = add_sample(sample)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        sys.exit(1)
+
+    console.print(f"[green]샘플 등록: {sample_id} (실제 {sample.actual_grade}, 신뢰도 {evidence})[/green]")
+    console.print(f"[dim]{path}[/dim]")
+    if evidence != "A":
+        console.print("[yellow]⚠ 신뢰도 A(실제 결과 확인) 샘플이 아니므로 기본 보정에는 반영되지 않습니다.[/yellow]")
+
+
+@opic_calibrate.command("list")
+def opic_calibrate_list():
+    """등록된 샘플 목록."""
+    from stage6_opic_coach.calibration import EVIDENCE_LEVELS, load_samples
+
+    samples = load_samples()
+    if not samples:
+        console.print("[yellow]등록된 샘플이 없습니다.[/yellow]")
+        return
+    for s in samples:
+        console.print(
+            f"- [bold]{s.sample_id}[/bold] | 실제 {s.actual_grade} | "
+            f"{s.evidence} ({EVIDENCE_LEVELS[s.evidence]}) | "
+            f"음성 {'있음' if s.has_audio else '없음'} | {s.source or '출처 미기재'}"
+        )
+
+
+@opic_calibrate.command("run")
+@click.option("--sample-id", default=None, help="특정 샘플만 실행 (미지정 시 전체)")
+@click.option("--evidence", default=None, type=click.Choice(["A", "B", "C"]),
+              help="해당 신뢰도 샘플만 실행")
+def opic_calibrate_run(sample_id, evidence):
+    """실제 등급을 보지 않고 먼저 예측 → 실제와 비교 → Calibration Note 저장."""
+    from stage6_opic_coach.calibration import get_sample, load_samples, run_calibration
+
+    settings = _load_settings()
+
+    if sample_id:
+        sample = get_sample(sample_id)
+        if not sample:
+            console.print(f"[red]샘플을 찾을 수 없습니다: {sample_id}[/red]")
+            sys.exit(1)
+        samples = [sample]
+    else:
+        samples = load_samples([evidence] if evidence else None)
+
+    if not samples:
+        console.print("[yellow]대상 샘플이 없습니다.[/yellow]")
+        return
+
+    for s in samples:
+        console.print(f"[cyan]{s.sample_id} blind 예측 중...[/cyan]")
+        note = run_calibration(s, settings)
+        color = "green" if note.direction == "일치" else "yellow"
+        console.print(
+            f"  예상: {note.predicted_low}~{note.predicted_high} / "
+            f"실제: {note.actual_grade} → [{color}]{note.direction}[/{color}] (거리 {note.gap})"
+        )
+        if note.bias_tags:
+            console.print(f"  편향 태그: {', '.join(note.bias_tags)}")
+        console.print(f"  분석: {note.analysis}\n")
+
+
+@opic_calibrate.command("notes")
+@click.option("--output", default=None, type=click.Path(), help="리포트 저장 경로")
+def opic_calibrate_notes(output):
+    """누적된 Calibration Note + 현재 적용 중인 보정 기준 출력."""
+    from stage6_opic_coach.calibration import format_notes_report
+
+    settings = _load_settings()
+    report = format_notes_report(settings)
+    console.print(report)
+
+    if output:
+        Path(output).write_text(report, encoding="utf-8")
+        console.print(f"[green]저장: {output}[/green]")
 
 
 # ──────────────────────────────────────────────
